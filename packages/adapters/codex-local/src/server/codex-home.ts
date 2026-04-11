@@ -95,6 +95,21 @@ export async function prepareManagedCodexHome(
     await ensureCopiedFile(path.join(targetHome, name), source);
   }
 
+  // Seed user's local skills from shared CODEX_HOME into managed home.
+  // Skills already present (e.g. Paperclip-managed ones) are never overwritten.
+  const sourceSkillsDir = path.join(sourceHome, "skills");
+  const targetSkillsDir = path.join(targetHome, "skills");
+  if (await pathExists(sourceSkillsDir)) {
+    await fs.mkdir(targetSkillsDir, { recursive: true });
+    const entries = await fs.readdir(sourceSkillsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const targetPath = path.join(targetSkillsDir, entry.name);
+      if (await pathExists(targetPath)) continue;
+      const sourcePath = path.join(sourceSkillsDir, entry.name);
+      await ensureSymlink(targetPath, sourcePath);
+    }
+  }
+
   await onLog(
     "stdout",
     `[paperclip] Using ${isWorktreeMode(env) ? "worktree-isolated" : "Paperclip-managed"} Codex home "${targetHome}" (seeded from "${sourceHome}").\n`,
