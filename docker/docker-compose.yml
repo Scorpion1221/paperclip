@@ -29,8 +29,12 @@ services:
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
       PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
+      CLAUDE_CODE_USE_VERTEX: "${CLAUDE_CODE_USE_VERTEX:-}"
+      ANTHROPIC_VERTEX_PROJECT_ID: "${ANTHROPIC_VERTEX_PROJECT_ID:-}"
+      GOOGLE_APPLICATION_CREDENTIALS: "/etc/gcp/credentials.json"
     volumes:
       - paperclip-data:/paperclip
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/etc/gcp/credentials.json:ro
     depends_on:
       db:
         condition: service_healthy
