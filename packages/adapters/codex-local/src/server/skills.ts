@@ -7,8 +7,10 @@ import type {
 } from "@paperclipai/adapter-utils";
 import {
   readPaperclipRuntimeSkillEntries,
+  readInstalledSkillTargets,
   resolvePaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
+import { resolveSharedCodexHomeDir } from "./codex-home.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +55,26 @@ async function buildCodexSkillSnapshot(
       sourcePath: null,
       targetPath: null,
       detail: "Paperclip cannot find this skill in the local runtime skills directory.",
+    });
+  }
+
+  const skillsHome = path.join(resolveSharedCodexHomeDir(), "skills");
+  const installed = await readInstalledSkillTargets(skillsHome);
+  for (const [name, installedEntry] of installed.entries()) {
+    if (availableEntries.some((entry) => entry.runtimeName === name)) continue;
+    entries.push({
+      key: name,
+      runtimeName: name,
+      desired: false,
+      managed: false,
+      state: "external",
+      origin: "user_installed",
+      originLabel: "User-installed",
+      locationLabel: "~/.codex/skills",
+      readOnly: true,
+      sourcePath: null,
+      targetPath: installedEntry.targetPath ?? path.join(skillsHome, name),
+      detail: "Installed outside Paperclip management in the Codex skills home.",
     });
   }
 
