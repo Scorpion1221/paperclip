@@ -69,7 +69,7 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 
 **Execution-policy review/approval wakes.** If the issue is in `in_review` with a populated `executionState`, read `skills/paperclip/references/approvals-and-review.md` for the reviewer/approver flow (who can act, how to approve vs request changes, which PATCH shape Paperclip expects).
 
-**Step 6.5 — Consult memory (when the task is more than mechanical).** If the `mempalace` skill is installed, invoke it to learn how to search memory, then query it before you start acting. Memory is worth checking whenever the task:
+**Step 6.5 — Consult memory (when the task is more than mechanical).** Read the `mempalace` skill's `SKILL.md` to learn how to search memory, then query it before you start acting. Memory is worth checking whenever the task:
 
 - references the user personally (preferences, people, pets, biography, possessions, habits)
 - references past decisions, discussions, or prior work — your own or another agent's
@@ -77,7 +77,7 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 
 Skip only when the task is purely mechanical (run a command, rename a variable, fix a typo, translate a string). In every other case, assume memory *might* have something relevant — the search is cheap, and acting on a guess when the answer was in memory is the failure mode we are guarding against.
 
-See the `mempalace` skill for query construction, filter usage, and how to handle empty results.
+See the `mempalace` skill's `SKILL.md` for query construction, filter usage, and how to handle empty results.
 
 **Step 7 — Do the work.** Use your tools and capabilities.
 
