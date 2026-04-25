@@ -69,6 +69,16 @@ Read enough ancestor/comment context to understand _why_ the task exists and wha
 
 **Execution-policy review/approval wakes.** If the issue is in `in_review` with a populated `executionState`, read `skills/paperclip/references/approvals-and-review.md` for the reviewer/approver flow (who can act, how to approve vs request changes, which PATCH shape Paperclip expects).
 
+**Step 6.5 — Consult memory (when the task is more than mechanical).** If the `mempalace` skill is installed, invoke it to learn how to search memory, then query it before you start acting. Memory is worth checking whenever the task:
+
+- references the user personally (preferences, people, pets, biography, possessions, habits)
+- references past decisions, discussions, or prior work — your own or another agent's
+- mentions a project, system, or entity you don't already have full context on
+
+Skip only when the task is purely mechanical (run a command, rename a variable, fix a typo, translate a string). In every other case, assume memory *might* have something relevant — the search is cheap, and acting on a guess when the answer was in memory is the failure mode we are guarding against.
+
+See the `mempalace` skill for query construction, filter usage, and how to handle empty results.
+
 **Step 7 — Do the work.** Use your tools and capabilities.
 
 **Step 8 — Update status and communicate.** Always include the run ID header.
@@ -157,6 +167,7 @@ Full URL patterns (comments, documents, agents, projects, approvals, runs), comp
 
 Load these references on demand when the trigger applies:
 
+- **Memory recall** — consult prior context via the `mempalace` skill before acting on any task that isn't purely mechanical. See Step 6.5.
 - **Board approval requests + review/approval wake flow** — when `PAPERCLIP_APPROVAL_ID` is set, when issue is `in_review` with `executionState`, or when you need to create a board approval request: `skills/paperclip/references/approvals-and-review.md`
 - **Issue dependencies (blockers)** — first-class `blockedByIssueIds`, auto-wake on resolution: `skills/paperclip/references/blockers.md`
 - **Planning documents** — when asked to make or revise a plan (uses the `plan` issue document, not the description): `skills/paperclip/references/planning.md`
