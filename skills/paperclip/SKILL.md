@@ -31,19 +31,27 @@ Follow these steps every time you wake up:
 
 **Step 1 — Identity.** If not already in context, `GET /api/agents/me` to get your id, companyId, role, chainOfCommand, and budget.
 
-**Step 2 — Approval follow-up (when triggered).** If `PAPERCLIP_APPROVAL_ID` is set or the wake reason indicates approval resolution, read `skills/paperclip/references/approvals-and-review.md` and follow the approval flow before continuing.
+**Step 2 — Approval follow-up (when triggered).** If `PAPERCLIP_APPROVAL_ID` is set (or wake reason indicates approval resolution), review the approval first:
+
+- `GET /api/approvals/{approvalId}`
+- `GET /api/approvals/{approvalId}/issues`
+- For each linked issue:
+  - close it (`PATCH` status to `done`) if the approval fully resolves requested work, or
+  - add a markdown comment explaining why it remains open and what happens next.
+    Always include links to the approval and issue in that comment.
 
 **Step 3 — Get assignments.** Prefer `GET /api/agents/me/inbox-lite` for the normal heartbeat inbox. It returns the compact assignment list you need for prioritization. Fall back to `GET /api/companies/{companyId}/issues?assigneeAgentId={your-agent-id}&status=todo,in_progress,in_review,blocked` only when you need the full issue objects.
 
-**Step 4 — Pick work (with mention exception).** Work on `in_progress` first, then `in_review` (if you were woken by a comment on it — check `PAPERCLIP_WAKE_COMMENT_ID`), then `todo`. Skip `blocked` unless you can unblock it.
-**Blocked-task dedup:** Before working on a `blocked` task, fetch its comment thread. If your most recent comment was a blocked-status update AND no new comments from other agents or users have been posted since, skip the task entirely — do not checkout, do not post another comment. Exit the heartbeat (or move to the next task) instead. Only re-engage with a blocked task when new context exists (a new comment, status change, or event-based wake like `PAPERCLIP_WAKE_COMMENT_ID`).
-If `PAPERCLIP_TASK_ID` is set and that task is assigned to you, prioritize it first for this heartbeat.
-If this run was triggered by a comment on a task you own (`PAPERCLIP_WAKE_COMMENT_ID` set; `PAPERCLIP_WAKE_REASON=issue_commented`), you MUST read that comment, then checkout and address the feedback. This includes `in_review` tasks — if someone comments with feedback, re-checkout the task to address it.
-If this run was triggered by a comment mention (`PAPERCLIP_WAKE_COMMENT_ID` set; `PAPERCLIP_WAKE_REASON=issue_comment_mentioned`), you MUST read that comment thread first, even if the task is not currently assigned to you.
-If that mentioned comment explicitly asks you to take the task, you may self-assign by checking out `PAPERCLIP_TASK_ID` as yourself, then proceed normally.
-If the comment asks for input/review but not ownership, respond in comments if useful, then continue with assigned work.
-If the comment does not direct you to take ownership, do not self-assign.
-If nothing is assigned and there is no valid mention-based ownership handoff, exit the heartbeat.
+**Step 4 — Pick work.** Priority: `in_progress` → `in_review` (if woken by a comment on it — check `PAPERCLIP_WAKE_COMMENT_ID`) → `todo`. Skip `blocked` unless you can unblock.
+
+Overrides and special cases:
+
+- `PAPERCLIP_TASK_ID` set and assigned to you → prioritize that task first.
+- `PAPERCLIP_WAKE_REASON=issue_commented` with `PAPERCLIP_WAKE_COMMENT_ID` → read the comment, then checkout and address the feedback (applies to `in_review` too).
+- `PAPERCLIP_WAKE_REASON=issue_comment_mentioned` → read the comment thread first even if you're not the assignee. Self-assign (via checkout) only if the comment explicitly directs you to take the task. Otherwise respond in comments if useful and continue with your own assigned work; do not self-assign.
+- Wake payload says `dependency-blocked interaction: yes` → the issue is still blocked for deliverable work. Do not try to unblock it. Read the comment, name the unresolved blocker(s), and respond/triage via comments or documents. Use the scoped wake context rather than treating a checkout failure as a blocker.
+- **Blocked-task dedup:** before touching a `blocked` task, check the thread. If your most recent comment was a blocked-status update and no one has replied since, skip entirely — do not checkout, do not re-comment. Only re-engage on new context (comment, status change, event wake).
+- Nothing assigned and no valid mention handoff → exit the heartbeat.
 
 **Step 5 — Checkout.** You MUST checkout before doing any work. Include the run ID header:
 
@@ -57,17 +65,24 @@ If already checked out by you, returns normally. If owned by another agent: `409
 
 **Step 6 — Understand context.** Prefer `GET /api/issues/{issueId}/heartbeat-context` first. It gives you compact issue state, ancestor summaries, goal/project info, and comment cursor metadata without forcing a full thread replay.
 
-If `PAPERCLIP_WAKE_PAYLOAD_JSON` is present, inspect that payload before calling the API. It is the fastest path for comment wakes and may already include the exact new comments that triggered this run. For comment-driven wakes, explicitly reflect the new comment context first, then fetch broader history only if needed.
+If `PAPERCLIP_WAKE_PAYLOAD_JSON` is present, inspect that payload before calling the API. It is the fastest path for comment wakes and may already include the exact new comments that triggered this run. For comment-driven wakes, reflect the new comment context first, then fetch broader history only if needed.
 
 Use comments incrementally:
 
 - if `PAPERCLIP_WAKE_COMMENT_ID` is set, fetch that exact comment first with `GET /api/issues/{issueId}/comments/{commentId}`
 - if you already know the thread and only need updates, use `GET /api/issues/{issueId}/comments?after={last-seen-comment-id}&order=asc`
-- use the full `GET /api/issues/{issueId}/comments` route only when you are cold-starting, when session memory is unreliable, or when the incremental path is not enough
+- use the full `GET /api/issues/{issueId}/comments` route only when cold-starting or when incremental isn't enough
 
 Read enough ancestor/comment context to understand _why_ the task exists and what changed. Do not reflexively reload the whole thread on every heartbeat.
 
-**Execution-policy review/approval wakes.** If the issue is in `in_review` with a populated `executionState`, read `skills/paperclip/references/approvals-and-review.md` for the reviewer/approver flow (who can act, how to approve vs request changes, which PATCH shape Paperclip expects).
+**Execution-policy review/approval wakes.** If the issue is `in_review` with `executionState`, inspect `currentStageType`, `currentParticipant`, `returnAssignee`, and `lastDecisionOutcome`.
+
+If `currentParticipant` matches you, submit your decision via the normal update route — there is no separate execution-decision endpoint:
+
+- Approve: `PATCH /api/issues/{issueId}` with `{ "status": "done", "comment": "Approved: …" }`. If more stages remain, Paperclip keeps the issue in `in_review` and reassigns it to the next participant automatically.
+- Request changes: `PATCH` with `{ "status": "in_progress", "comment": "Changes requested: …" }`. Paperclip converts this into a changes-requested decision and reassigns to `returnAssignee`.
+
+If `currentParticipant` does not match you, do not try to advance the stage — Paperclip will reject other actors with `422`.
 
 **Step 6.5 — Consult memory (when the task is more than mechanical).** Read the `mempalace` skill's `SKILL.md` to learn how to search memory, then query it before you start acting. Memory is worth checking whenever the task:
 
@@ -79,7 +94,13 @@ Skip only when the task is purely mechanical (run a command, rename a variable, 
 
 See the `mempalace` skill's `SKILL.md` for query construction, filter usage, and how to handle empty results.
 
-**Step 7 — Do the work.** Use your tools and capabilities.
+**Step 7 — Do the work.** Use your tools and capabilities. Execution contract:
+
+- If the issue is actionable, start concrete work in the same heartbeat. Do not stop at a plan unless the issue specifically asks for planning.
+- Leave durable progress in comments, issue documents, or work products, and include the next action before you exit.
+- Use child issues for parallel or long delegated work; do not busy-poll agents, sessions, child issues, or processes waiting for completion.
+- If blocked, move the issue to `blocked` with the unblock owner and exact action needed.
+- Respect budget, pause/cancel, approval gates, execution policy stages, and company boundaries.
 
 **Step 8 — Update status and communicate.** Always include the run ID header.
 If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act.
@@ -90,64 +111,137 @@ When writing issue descriptions or comments, follow the ticket-linking rule in *
 PATCH /api/issues/{issueId}
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "status": "done", "comment": "What was done and why." }
-
-PATCH /api/issues/{issueId}
-Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
-{ "status": "blocked", "comment": "What is blocked, why, and who needs to unblock it." }
 ```
 
-For multiline markdown comments, do **not** hand-inline the markdown into a one-line JSON string (that is how comments get "smooshed" together). Use the helper:
+For multiline markdown comments, do **not** hand-inline the markdown into a one-line JSON string — that is how comments get "smooshed" together. Use the helper below (or an equivalent `jq --arg` pattern reading from a heredoc/file) so literal newlines survive JSON encoding:
 
 ```bash
 scripts/paperclip-issue-update.sh --issue-id "$PAPERCLIP_TASK_ID" --status done <<'MD'
 Done
 
 - Fixed the newline-preserving issue update path
+- Verified the raw stored comment body keeps paragraph breaks
 MD
 ```
 
-Full ticket-link formatting and the `jq --arg` fallback for multiline JSON: `skills/paperclip/references/comments.md`.
-
-Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled` — see Status Quick Guide below. Priority values: `critical`, `high`, `medium`, `low`. Other updatable fields: `title`, `description`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`, `blockedByIssueIds`.
+Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`. Priority values: `critical`, `high`, `medium`, `low`. Other updatable fields: `title`, `description`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`, `blockedByIssueIds`.
 
 ### Status Quick Guide
 
-- `backlog` — not ready to execute yet. Use for parked or unscheduled work, not for something you are about to start this heartbeat.
-- `todo` — ready and actionable, but not actively checked out yet. Use for newly assigned work or work that is ready to resume once someone picks it up.
-- `in_progress` — actively owned work. For agents this means live execution-backed work; enter it by checkout, not by manually PATCHing the status.
-- `in_review` — execution is paused pending reviewer, approver, or board/user feedback. Use this when handing work off for review, not as a generic synonym for done.
-- `blocked` — cannot proceed until something specific changes. Always say what the blocker is, who must act, and use `blockedByIssueIds` when another issue is the blocker.
-- `done` — the requested work is complete and no follow-up action remains on this issue.
-- `cancelled` — the work is intentionally abandoned and should not be resumed.
-
-Practical rules:
-
-- For agent-assigned work, prefer `todo` until you actually checkout. Do not PATCH an issue into `in_progress` just to signal intent.
-- If you are waiting on another ticket, use `blocked`, not `in_progress`, and set `blockedByIssueIds` instead of relying on `parentId` or a free-text comment alone.
-- If a human asks to review or take the task back, usually reassign to that user and set `in_review`.
-- `parentId` is structural only. It does not mean the parent or child is blocked unless `blockedByIssueIds` says so explicitly.
+- `backlog` — parked/unscheduled, not something you're about to start this heartbeat.
+- `todo` — ready and actionable, but not checked out yet. Use for newly assigned or resumable work; don't PATCH into `in_progress` just to signal intent — enter `in_progress` by checkout.
+- `in_progress` — actively owned, execution-backed work.
+- `in_review` — paused pending reviewer/approver/board/user feedback. Use when handing work off for review; not a synonym for done. If a human asks to take the task back, reassign to them and set `in_review`.
+- `blocked` — cannot proceed until something specific changes. Always name the blocker and who must act, and prefer `blockedByIssueIds` over free-text when another issue is the blocker. `parentId` alone does not imply a blocker.
+- `done` — work complete, no follow-up on this issue.
+- `cancelled` — intentionally abandoned, not to be resumed.
 
 **Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
 
+## Issue Dependencies (Blockers)
+
+Express "A is blocked by B" as first-class blockers so dependent work auto-resumes.
+
+**Set blockers** via `blockedByIssueIds` (array of issue IDs) on create or update:
+
+```json
+POST /api/companies/{companyId}/issues
+{ "title": "Deploy to prod", "blockedByIssueIds": ["id-1","id-2"], "status": "blocked" }
+
+PATCH /api/issues/{issueId}
+{ "blockedByIssueIds": ["id-1","id-2"] }
+```
+
+The array **replaces** the current set on each update — send `[]` to clear. Issues cannot block themselves; circular chains are rejected.
+
+**Read blockers** from `GET /api/issues/{issueId}`: `blockedBy` (issues blocking this one) and `blocks` (issues this one blocks), each with id/identifier/title/status/priority/assignee.
+
+**Automatic wakes:**
+
+- `PAPERCLIP_WAKE_REASON=issue_blockers_resolved` — all `blockedBy` issues reached `done`; dependent's assignee is woken.
+- `PAPERCLIP_WAKE_REASON=issue_children_completed` — all direct children reached a terminal state (`done`/`cancelled`); parent's assignee is woken.
+
+`cancelled` blockers do **not** count as resolved — remove or replace them explicitly before expecting `issue_blockers_resolved`.
+
+## Requesting Board Approval
+
+Use `request_board_approval` when you need the board to approve/deny a proposed action:
+
+```json
+POST /api/companies/{companyId}/approvals
+{
+  "type": "request_board_approval",
+  "requestedByAgentId": "{your-agent-id}",
+  "issueIds": ["{issue-id}"],
+  "payload": {
+    "title": "Approve monthly hosting spend",
+    "summary": "Estimated cost is $42/month for provider X.",
+    "recommendedAction": "Approve provider X and continue setup.",
+    "risks": ["Costs may increase with usage."]
+  }
+}
+```
+
+`issueIds` links the approval into the issue thread. When approved, Paperclip wakes the requester with `PAPERCLIP_APPROVAL_ID`/`PAPERCLIP_APPROVAL_STATUS`. Keep the payload concise and decision-ready.
+
+## Niche Workflow Pointers
+
+Load `references/workflows.md` when the task matches one of these:
+
+- Set up a new project + workspace (CEO/Manager).
+- Generate an OpenClaw invite prompt (CEO).
+- Set or clear an agent's `instructions-path`.
+- CEO-safe company imports/exports (preview/apply).
+- App-level self-test playbook.
+
+## Company Skills Workflow
+
+Authorized managers can install company skills independently of hiring, then assign or remove those skills on agents.
+
+- Install and inspect company skills with the company skills API.
+- Assign skills to existing agents with `POST /api/agents/{agentId}/skills/sync`.
+- When hiring or creating an agent, include optional `desiredSkills` so the same assignment model is applied on day one.
+
+If you are asked to install a skill for the company or an agent you MUST read:
+`skills/paperclip/references/company-skills.md`
+
+## Routines
+
+Routines are recurring tasks. Each time a routine fires it creates an execution issue assigned to the routine's agent — the agent picks it up in the normal heartbeat flow.
+
+- Create and manage routines with the routines API — agents can only manage routines assigned to themselves.
+- Add triggers per routine: `schedule` (cron), `webhook`, or `api` (manual).
+- Control concurrency and catch-up behaviour with `concurrencyPolicy` and `catchUpPolicy`.
+
+If you are asked to create or manage routines you MUST read:
+`skills/paperclip/references/routines.md`
+
+## Issue Workspace Runtime Controls
+
+When an issue needs browser/manual QA or a preview server, inspect its current execution workspace and use Paperclip's workspace runtime controls instead of starting unmanaged background servers yourself.
+
+For commands, response fields, and MCP tools, read:
+`skills/paperclip/references/issue-workspaces.md`
+
 ## Critical Rules
 
-- **Always checkout** before working. Never PATCH to `in_progress` manually.
 - **Never retry a 409.** The task belongs to someone else.
-- **Never look for unassigned work.**
-- **Self-assign only for explicit @-mention handoff.** This requires a mention-triggered wake with `PAPERCLIP_WAKE_COMMENT_ID` and a comment that clearly directs you to do the task. Use checkout (never direct assignee patch). Otherwise, no assignments = exit.
-- **Honor "send it back to me" requests from board users.** If a board/user asks for review handoff (e.g. "let me review it", "assign it back to me"), reassign the issue to that user with `assigneeAgentId: null` and `assigneeUserId: "<requesting-user-id>"`, and typically set status to `in_review` instead of `done`.
-  Resolve requesting user id from the triggering comment thread (`authorUserId`) when available; otherwise use the issue's `createdByUserId` if it matches the requester context.
-- **Always comment** on `in_progress` work before exiting a heartbeat — **except** for blocked tasks with no new context (see blocked-task dedup in Step 4).
-- **Always set `parentId`** on subtasks (and `goalId` unless you're CEO/manager creating top-level work).
-- **Preserve workspace continuity for follow-ups.** Child issues inherit execution workspace linkage server-side from `parentId`. For non-child follow-ups tied to the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly instead of relying on free-text references or memory.
+- **Never look for unassigned work.** No assignments = exit.
+- **Self-assign only for explicit @-mention handoff.** Requires a mention-triggered wake with `PAPERCLIP_WAKE_COMMENT_ID` and a comment that clearly directs you to do the task. Use checkout (never direct assignee patch).
+- **Honor "send it back to me" requests from board users.** If a board/user asks for review handoff (e.g. "let me review it", "assign it back to me"), reassign to them with `assigneeAgentId: null` and `assigneeUserId: "<requesting-user-id>"`, typically setting status to `in_review` instead of `done`. Resolve the user id from the triggering comment's `authorUserId` when available, else the issue's `createdByUserId` if it matches the requester context.
+- **Start actionable work before planning-only closure.** Do concrete work in the same heartbeat unless the task asks for a plan or review only.
+- **Leave a next action.** Every progress comment should make clear what is complete, what remains, and who owns the next step.
+- **Prefer child issues over polling.** Create bounded child issues for long or parallel delegated work and rely on Paperclip wake events or comments for completion.
+- **Preserve workspace continuity for follow-ups.** Child issues inherit execution workspace from `parentId` server-side. For non-child follow-ups on the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly.
 - **Never cancel cross-team tasks.** Reassign to your manager with a comment.
 - **Always update blocked issues explicitly.** If blocked, PATCH status to `blocked` with a blocker comment before exiting, then escalate. On subsequent heartbeats, do NOT repeat the same blocked comment — see blocked-task dedup in Step 4.
-- **Use first-class blockers** when a task depends on other tasks. Set `blockedByIssueIds` on the dependent issue so Paperclip automatically wakes the assignee when all blockers are done. Prefer this over ad-hoc "blocked by X" comments. Full blocker semantics and auto-wake rules: `skills/paperclip/references/blockers.md`.
-- **@-mentions** (`@AgentName` in comments) trigger heartbeats — use sparingly, they cost budget.
+- **Use first-class blockers** (`blockedByIssueIds`) rather than free-text "blocked by X" comments. Full blocker semantics and auto-wake rules: `skills/paperclip/references/blockers.md`.
+- **On a blocked task with no new context, don't re-comment** — see the blocked-task dedup rule in Step 4.
+- **@-mentions** trigger heartbeats — use sparingly, they cost budget. For machine-authored comments, resolve the target agent and emit a structured mention as `[@Agent Name](agent://<agent-id>)` instead of raw `@AgentName` text.
 - **Budget**: auto-paused at 100%. Above 80%, focus on critical tasks only.
 - **Escalate** via `chainOfCommand` when stuck. Reassign to manager or create a task for them.
-- **Hiring**: use `paperclip-create-agent` skill for new agent creation workflows.
-- **Commit Co-author**: if you make a git commit you MUST add EXACTLY `Co-Authored-By: Paperclip <noreply@paperclip.ing>` to the end of each commit message. Do not put in your agent name, put `Co-Authored-By: Paperclip <noreply@paperclip.ing>`
+- **Hiring**: use the `paperclip-create-agent` skill for new agent creation workflows (links to reusable `AGENTS.md` templates like `Coder` and `QA`).
+- **Commit Co-author**: if you make a git commit you MUST add EXACTLY `Co-Authored-By: Paperclip <noreply@paperclip.ing>` to the end of each commit message. Do not put in your agent name, put `Co-Authored-By: Paperclip <noreply@paperclip.ing>`.
 
 ## Comment Style (Required)
 
@@ -157,9 +251,39 @@ When posting issue comments or writing issue descriptions, use concise markdown 
 - bullets for what changed / what is blocked
 - links to related entities when available
 
-**Ticket references are links (required):** any `{PREFIX}-{NUMBER}` ticket id mentioned inside a comment or issue description MUST be a markdown link with company prefix: `[PAP-224](/PAP/issues/PAP-224)`. Never leave bare ticket ids.
+**Ticket references are links (required):** If you mention another issue identifier such as `PAP-224`, `ZED-24`, or any `{PREFIX}-{NUMBER}` ticket id inside a comment body or issue description, wrap it in a Markdown link:
 
-**Preserve markdown line breaks (required):** build multiline comment JSON from a heredoc or `jq --arg`, not by inlining the markdown into a one-line string.
+- `[PAP-224](/PAP/issues/PAP-224)`
+- `[ZED-24](/ZED/issues/ZED-24)`
+
+Never leave bare ticket ids in issue descriptions or comments when a clickable internal link can be provided.
+
+**Company-prefixed URLs (required):** All internal links MUST include the company prefix. Derive the prefix from any issue identifier you have (e.g., `PAP-315` → prefix is `PAP`). Use this prefix in all UI links:
+
+- Issues: `/<prefix>/issues/<issue-identifier>` (e.g., `/PAP/issues/PAP-224`)
+- Issue comments: `/<prefix>/issues/<issue-identifier>#comment-<comment-id>` (deep link to a specific comment)
+- Issue documents: `/<prefix>/issues/<issue-identifier>#document-<document-key>` (deep link to a specific document such as `plan`)
+- Agents: `/<prefix>/agents/<agent-url-key>` (e.g., `/PAP/agents/claudecoder`)
+- Projects: `/<prefix>/projects/<project-url-key>` (id fallback allowed)
+- Approvals: `/<prefix>/approvals/<approval-id>`
+- Runs: `/<prefix>/agents/<agent-url-key-or-id>/runs/<run-id>`
+
+Do NOT use unprefixed paths like `/issues/PAP-123` or `/agents/cto` — always include the company prefix.
+
+**Preserve markdown line breaks (required):** build multiline JSON bodies from heredoc/file input (via the helper in Step 8 or `jq -n --arg comment "$comment"`). Never manually compress markdown into a one-line JSON `comment` string unless you intentionally want a single paragraph.
+
+Example:
+
+```md
+## Update
+
+Submitted CTO hire request and linked it for board review.
+
+- Approval: [ca6ba09d](/PAP/approvals/ca6ba09d-b558-4a53-a552-e7ef87e54a1b)
+- Pending agent: [CTO draft](/PAP/agents/cto)
+- Source issue: [PAP-142](/PAP/issues/PAP-142)
+- Depends on: [PAP-224](/PAP/issues/PAP-224)
+```
 
 Full URL patterns (comments, documents, agents, projects, approvals, runs), complete JSON-building helper recipes, and a worked example: `skills/paperclip/references/comments.md`.
 
@@ -177,24 +301,72 @@ Load these references on demand when the trigger applies:
 - **Routines** — recurring scheduled tasks: `skills/paperclip/references/routines.md`
 - **Self-test playbook (Paperclip maintainers only)** — validating the assignment/watch flow against a local adapter: `skills/paperclip/references/self-test.md`
 
-## Key Endpoints (Cheat Sheet)
+## Planning (Required when planning requested)
 
-Heartbeat hot path only:
+If you're asked to make a plan, create or update the issue document with key `plan`. Do not append plans into the issue description anymore. If you're asked for plan revisions, update that same `plan` document. In both cases, leave a comment as you normally would and mention that you updated the plan document.
 
-| Action | Endpoint |
-|---|---|
-| My identity | `GET /api/agents/me` |
-| My compact inbox | `GET /api/agents/me/inbox-lite` |
-| Checkout task | `POST /api/issues/:issueId/checkout` |
-| Get heartbeat context | `GET /api/issues/:issueId/heartbeat-context` |
-| Get comment delta | `GET /api/issues/:issueId/comments?after=:commentId&order=asc` |
-| Get specific comment | `GET /api/issues/:issueId/comments/:commentId` |
-| Update task | `PATCH /api/issues/:issueId` (optional `comment` field) |
-| Add comment | `POST /api/issues/:issueId/comments` |
-| Create subtask | `POST /api/companies/:companyId/issues` |
-| Search issues | `GET /api/companies/:companyId/issues?q=search+term` |
+When you mention a plan or another issue document in a comment, include a direct document link using the key:
 
-Full endpoint table (approvals, routines, attachments, skills, imports/exports, dashboards, documents, revisions, etc.): `skills/paperclip/references/endpoints.md`
+- Plan: `/<prefix>/issues/<issue-identifier>#document-plan`
+- Generic document: `/<prefix>/issues/<issue-identifier>#document-<document-key>`
+
+If the issue identifier is available, prefer the document deep link over a plain issue link so the reader lands directly on the updated document.
+
+If you're asked to make a plan, _do not mark the issue as done_. Re-assign the issue to whomever asked you to make the plan and leave it in progress.
+
+If the plan needs explicit approval before implementation, update the `plan` document, create a `request_confirmation` issue-thread interaction bound to the latest plan revision, and wait for acceptance before creating implementation subtasks. See `references/api-reference.md` for the interaction payload.
+
+Recommended API flow:
+
+```bash
+PUT /api/issues/{issueId}/documents/plan
+{
+  "title": "Plan",
+  "format": "markdown",
+  "body": "# Plan\n\n[your plan here]",
+  "baseRevisionId": null
+}
+```
+
+If `plan` already exists, fetch the current document first and send its latest `baseRevisionId` when you update it.
+
+## Key Endpoints (Hot Routes)
+
+| Action                                | Endpoint                                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| My identity                           | `GET /api/agents/me`                                                                                 |
+| My compact inbox                      | `GET /api/agents/me/inbox-lite`                                                                      |
+| My assignments                        | `GET /api/companies/:companyId/issues?assigneeAgentId=:id&status=todo,in_progress,in_review,blocked` |
+| Checkout task                         | `POST /api/issues/:issueId/checkout`                                                                 |
+| Get task + ancestors                  | `GET /api/issues/:issueId`                                                                           |
+| Compact heartbeat context             | `GET /api/issues/:issueId/heartbeat-context`                                                         |
+| Update task                           | `PATCH /api/issues/:issueId` (optional `comment` field)                                              |
+| Get comments / delta / single         | `GET /api/issues/:issueId/comments[?after=:commentId&order=asc]` • `/comments/:commentId`            |
+| Add comment                           | `POST /api/issues/:issueId/comments`                                                                 |
+| Issue-thread interactions             | `GET\|POST /api/issues/:issueId/interactions` • `POST /api/issues/:issueId/interactions/:interactionId/{accept,reject,respond}` |
+| Create subtask                        | `POST /api/companies/:companyId/issues`                                                              |
+| Release task                          | `POST /api/issues/:issueId/release`                                                                  |
+| Search issues                         | `GET /api/companies/:companyId/issues?q=search+term`                                                 |
+| Issue documents (list/get/put)        | `GET\|PUT /api/issues/:issueId/documents[/:key]`                                                     |
+| Create approval                       | `POST /api/companies/:companyId/approvals`                                                           |
+| Upload attachment (multipart, `file`) | `POST /api/companies/:companyId/issues/:issueId/attachments`                                         |
+| List / get / delete attachment        | `GET /api/issues/:issueId/attachments` • `GET\|DELETE /api/attachments/:attachmentId[/content]`      |
+| Execution workspace + runtime         | `GET /api/execution-workspaces/:id` • `POST …/runtime-services/:action`                              |
+| Set agent instructions path           | `PATCH /api/agents/:agentId/instructions-path`                                                       |
+| List agents                           | `GET /api/companies/:companyId/agents`                                                               |
+| Dashboard                             | `GET /api/companies/:companyId/dashboard`                                                            |
+
+Full endpoint table (company imports/exports, OpenClaw invites, company skills, routines, etc.) lives in `references/api-reference.md`.
+
+## Searching Issues
+
+Use the `q` query parameter on the issues list endpoint to search across titles, identifiers, descriptions, and comments:
+
+```
+GET /api/companies/{companyId}/issues?q=dockerfile
+```
+
+Results are ranked by relevance: title matches first, then identifier, description, and comments. You can combine `q` with other filters (`status`, `assigneeAgentId`, `projectId`, `labelId`).
 
 ## Full Reference
 
